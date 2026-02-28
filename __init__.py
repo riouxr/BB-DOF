@@ -5,8 +5,8 @@
 
 bl_info = {
     "name":        "BB DOF",
-    "author":      "Blender Bob + Clausde.ai",
-    "version":     (1, 3, 4),
+    "author":      "Blender Bob + Claude.ai",
+    "version":     (1, 3, 9),
     "blender":     (4, 2, 0),
     "location":    "Properties › Render › BB DOF",
     "description": "Real-time depth-of-field visualiser",
@@ -15,7 +15,7 @@ bl_info = {
 
 import bpy
 import math
-from bpy.props import BoolProperty, StringProperty, PointerProperty
+from bpy.props import BoolProperty, FloatProperty, StringProperty, PointerProperty
 from bpy.app.handlers import persistent
 
 
@@ -42,6 +42,30 @@ def compute_dof_limits(cam_data, cam_obj=None):
     df    = H - focus
     far   = (focus * (H - f)) / df if df > 1e-9 else 1e6
     return float(min(near, focus * 0.999)), float(focus), float(max(far, focus * 1.001))
+
+
+
+def solve_focus_fstop(near, far, cam_data):
+    """
+    Inverse DoF solver: given desired near & far limits, return the
+    (focus_distance, aperture_fstop) values that produce them exactly.
+    """
+    f   = cam_data.lens / 1000.0
+    coc = cam_data.sensor_width / 1500.0 / 1000.0
+    Dn, Df = max(near, 0.001), max(far, near * 1.001)
+    # Quadratic: (Dn+Df)*focus^2 - (2*Dn*Df + f*(Dn+Df))*focus + 2*Dn*f*Df = 0
+    a = Dn + Df
+    b = -(2*Dn*Df + f*(Dn + Df))
+    c = 2*Dn*f*Df
+    disc = b*b - 4*a*c
+    if disc < 0:
+        return None, None
+    focus = (-b + math.sqrt(max(0, disc))) / (2*a)
+    focus = max(focus, Dn * 1.001)
+    denom = Df - focus
+    H = focus*(Df - f) / denom if denom > 1e-6 else 1e9
+    N = (f*f) / ((H - f) * coc) if (H - f) > 1e-9 else 0.1
+    return max(0.001, focus), max(0.1, N)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -197,7 +221,7 @@ def _draw_dof_planes():
                 break
 
         near, focus, far = compute_dof_limits(cam_obj.data, cam_obj)
-        draw_far  = min(far, cam_obj.data.clip_end, 10_000.0)
+        draw_far  = min(far, 10_000.0)
         distances = {"near": near, "focus": focus, "far": draw_far}
 
         shader = gpu.shader.from_builtin('UNIFORM_COLOR')
@@ -253,7 +277,8 @@ def _position_planes(cam_obj, scene): pass
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _saved_clip:    dict = {}
-_prev_dof_vals: dict = {}
+_prev_dof_vals:  dict = {}
+_syncing_limits: bool = False  # guard: prevents depsgraph sync from re-triggering callbacks
 
 
 def _get_target_camera(context):
@@ -394,6 +419,14 @@ class BB_DOF_OT_SelectCamera(bpy.types.Operator):
         if p.colors_active:   _apply_colors(context)
         if p.clipping_active: _apply_clipping(context)
 
+        # Sync sensor slider to the newly selected camera's actual sensor width
+        if cam:
+            global _syncing_limits
+            _syncing_limits = True
+            p.sensor_width      = cam.data.sensor_width
+            p.prev_sensor_width = cam.data.sensor_width
+            _syncing_limits = False
+
         # Re-create / re-parent planes to the new camera (safe: we're in an operator)
         _create_planes()
 
@@ -459,15 +492,37 @@ class BB_DOF_PT_Panel(bpy.types.Panel):
             dof_col.enabled = is_target
             dof_col.prop(cam_obj.data.dof, "use_dof", text="Enable DOF")
 
-            # ── Sliders — changing them auto-enables DOF ──────────────────────
+            # ── Sliders ───────────────────────────────────────────────────────
             sliders = dof_col.column(align=True)
-            if cam_obj.data.dof.focus_object:
-                row = sliders.row(align=True)
-                row.enabled = False
-                row.label(text=f"Focus: {cam_obj.data.dof.focus_object.name}", icon='OBJECT_DATA')
+            has_focus_obj = bool(cam_obj.data.dof.focus_object)
+
+            # Near limit
+            if has_focus_obj:
+                r = sliders.row(align=True); r.enabled = False
+                r.label(text="Near: driven by object", icon='OBJECT_DATA')
+            else:
+                sliders.prop(props, "near_limit", text="Near")
+
+            # Focus distance (middle)
+            if has_focus_obj:
+                r = sliders.row(align=True); r.enabled = False
+                r.label(text=f"Focus: {cam_obj.data.dof.focus_object.name}", icon='OBJECT_DATA')
             else:
                 sliders.prop(cam_obj.data.dof, "focus_distance", text="Focus")
+
+            # Far limit
+            if has_focus_obj:
+                r = sliders.row(align=True); r.enabled = False
+                r.label(text="Far: driven by object", icon='OBJECT_DATA')
+            else:
+                sliders.prop(props, "far_limit", text="Far")
+
+            # F-stop
             sliders.prop(cam_obj.data.dof, "aperture_fstop", text="F-stop")
+
+            # Sensor size (only for target camera)
+            if is_target:
+                sliders.prop(props, "sensor_width", text="Sensor Size")
 
         # ── Info readout ──────────────────────────────────────────────────────
         if props.colors_active or props.clipping_active:
@@ -488,12 +543,67 @@ class BB_DOF_PT_Panel(bpy.types.Panel):
 #  PROPERTIES
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _update_near_limit(self, context):
+    """User dragged the Near slider — solve for focus & fstop, then push to camera."""
+    if _syncing_limits:
+        return
+    cam = _get_target_camera(context)
+    if not cam or cam.data.dof.focus_object:
+        return
+    focus, N = solve_focus_fstop(self.near_limit, self.far_limit, cam.data)
+    if focus is not None:
+        cam.data.dof.focus_distance  = focus
+        cam.data.dof.aperture_fstop  = N
+
+
+def _update_far_limit(self, context):
+    """User dragged the Far slider — solve for focus & fstop, then push to camera."""
+    if _syncing_limits:
+        return
+    cam = _get_target_camera(context)
+    if not cam or cam.data.dof.focus_object:
+        return
+    focus, N = solve_focus_fstop(self.near_limit, self.far_limit, cam.data)
+    if focus is not None:
+        cam.data.dof.focus_distance  = focus
+        cam.data.dof.aperture_fstop  = N
+
+
+def _update_sensor_width(self, context):
+    """User dragged Sensor Size — scale focal length to preserve field of view."""
+    if _syncing_limits:
+        return
+    cam = _get_target_camera(context)
+    if not cam:
+        return
+    old = self.prev_sensor_width
+    new = self.sensor_width
+    if old > 0.001 and abs(new - old) > 1e-6:
+        cam.data.lens = cam.data.lens * (new / old)
+    self.prev_sensor_width = new
+    cam.data.sensor_width  = new
+
+
 class BB_DOF_Properties(bpy.types.PropertyGroup):
     colors_active:   BoolProperty(name="Colors Active",    default=False)
     clipping_active: BoolProperty(name="Clipping Active",  default=False)
     planes_active:   BoolProperty(name="Planes Active",    default=True)
     selected_camera: StringProperty(name="Selected Camera", default="")
     prev_shading:    StringProperty(name="Previous Shading", default="")
+    near_limit: FloatProperty(
+        name="Near", description="Desired near depth-of-field limit",
+        default=1.0, min=0.001, soft_max=100.0, unit='LENGTH',
+        update=_update_near_limit)
+    far_limit: FloatProperty(
+        name="Far", description="Desired far depth-of-field limit",
+        default=10.0, min=0.001, soft_max=1000.0, unit='LENGTH',
+        update=_update_far_limit)
+    sensor_width: FloatProperty(
+        name="Sensor Size", description="Virtual sensor width — scales focal length to preserve framing",
+        default=36.0, min=1.0, soft_max=100.0, unit='CAMERA',
+        update=_update_sensor_width)
+    prev_sensor_width: FloatProperty(
+        name="Previous Sensor Width", default=36.0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -527,6 +637,23 @@ def _bb_dof_update(scene, depsgraph):
 
     try:
         n, fo, fa = compute_dof_limits(cam_obj.data, cam_obj)
+        # Keep near_limit/far_limit sliders in sync with the camera
+        # (e.g. when the user drags the Focus slider directly)
+        # Use guard so writing the props doesn't re-trigger the update callbacks.
+        global _syncing_limits
+        _syncing_limits = True
+        try:
+            if abs(props.near_limit - n) > 1e-4:
+                props.near_limit = n
+            fa_clamped = min(fa, 1e6)
+            if abs(props.far_limit - fa_clamped) > 1e-4:
+                props.far_limit = fa_clamped
+            # Keep sensor slider in sync if sensor_width was changed externally
+            if abs(props.sensor_width - cam_obj.data.sensor_width) > 1e-4:
+                props.sensor_width      = cam_obj.data.sensor_width
+                props.prev_sensor_width = cam_obj.data.sensor_width
+        finally:
+            _syncing_limits = False
         if props.colors_active:
             _update_material(n, fo, fa, cam_obj)
         if props.clipping_active:
