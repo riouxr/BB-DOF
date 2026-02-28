@@ -1,0 +1,18 @@
+schema_version = "1.3.1"
+
+id      = "bb_dof"
+version = "1.3.1"
+name    = "BB DOF"
+tagline = "Real-time depth-of-field visualiser with colour overlay, clipping & wireframe planes"
+
+maintainer = "BB"
+type       = "add-on"
+
+blender_version_min = "4.2.0"
+
+license  = ["SPDX:GPL-2.0-or-later"]
+category = "Render"
+
+[permissions]
+# No special permissions required — all GPU and scene access is via the
+# standard Blender Python API.
