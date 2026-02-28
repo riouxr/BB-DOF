@@ -5,8 +5,8 @@
 
 bl_info = {
     "name":        "BB DOF",
-    "author":      "Blender Bob + Claude.ai",
-    "version":     (1, 3, 3),
+    "author":      "Blender Bob + Clausde.ai",
+    "version":     (1, 3, 4),
     "blender":     (4, 2, 0),
     "location":    "Properties › Render › BB DOF",
     "description": "Real-time depth-of-field visualiser",
@@ -23,9 +23,16 @@ from bpy.app.handlers import persistent
 #  DoF MATHS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def compute_dof_limits(cam_data):
+def compute_dof_limits(cam_data, cam_obj=None):
     dof   = cam_data.dof
-    focus = max(dof.focus_distance, 0.001)
+    # If a focus object is set, derive focus distance from world-space positions
+    if dof.focus_object and cam_obj:
+        import mathutils
+        cam_pos  = cam_obj.matrix_world.translation
+        foc_pos  = dof.focus_object.matrix_world.translation
+        focus    = max((foc_pos - cam_pos).length, 0.001)
+    else:
+        focus = max(dof.focus_distance, 0.001)
     f     = cam_data.lens / 1000.0
     coc   = cam_data.sensor_width / 1500.0 / 1000.0
     N     = max(dof.aperture_fstop, 0.1)
@@ -189,7 +196,7 @@ def _draw_dof_planes():
                     return
                 break
 
-        near, focus, far = compute_dof_limits(cam_obj.data)
+        near, focus, far = compute_dof_limits(cam_obj.data, cam_obj)
         draw_far  = min(far, cam_obj.data.clip_end, 10_000.0)
         distances = {"near": near, "focus": focus, "far": draw_far}
 
@@ -260,7 +267,7 @@ def _get_target_camera(context):
 def _apply_colors(context):
     cam = _get_target_camera(context)
     if not cam: return
-    n, fo, fa = compute_dof_limits(cam.data)
+    n, fo, fa = compute_dof_limits(cam.data, cam)
     context.view_layer.material_override = _build_material(n, fo, fa, cam)
 
 def _remove_colors(context):
@@ -271,7 +278,7 @@ def _remove_colors(context):
 def _apply_clipping(context):
     cam = _get_target_camera(context)
     if not cam: return
-    n, fo, fa = compute_dof_limits(cam.data)
+    n, fo, fa = compute_dof_limits(cam.data, cam)
     _saved_clip[cam.name] = (cam.data.clip_start, cam.data.clip_end)
     cam.data.clip_start = max(0.001, n)
     cam.data.clip_end   = min(fa, 1e6)
@@ -454,7 +461,12 @@ class BB_DOF_PT_Panel(bpy.types.Panel):
 
             # ── Sliders — changing them auto-enables DOF ──────────────────────
             sliders = dof_col.column(align=True)
-            sliders.prop(cam_obj.data.dof, "focus_distance", text="Focus")
+            if cam_obj.data.dof.focus_object:
+                row = sliders.row(align=True)
+                row.enabled = False
+                row.label(text=f"Focus: {cam_obj.data.dof.focus_object.name}", icon='OBJECT_DATA')
+            else:
+                sliders.prop(cam_obj.data.dof, "focus_distance", text="Focus")
             sliders.prop(cam_obj.data.dof, "aperture_fstop", text="F-stop")
 
         # ── Info readout ──────────────────────────────────────────────────────
@@ -462,7 +474,7 @@ class BB_DOF_PT_Panel(bpy.types.Panel):
             cam = _get_target_camera(context)
             if cam:
                 try:
-                    n, fo, fa = compute_dof_limits(cam.data)
+                    n, fo, fa = compute_dof_limits(cam.data, cam)
                     info = layout.column(align=True)
                     info.separator(factor=0.4)
                     info.label(text=f"Near   {n:.3f} m",  icon='TRIA_RIGHT')
@@ -514,7 +526,7 @@ def _bb_dof_update(scene, depsgraph):
         return
 
     try:
-        n, fo, fa = compute_dof_limits(cam_obj.data)
+        n, fo, fa = compute_dof_limits(cam_obj.data, cam_obj)
         if props.colors_active:
             _update_material(n, fo, fa, cam_obj)
         if props.clipping_active:
