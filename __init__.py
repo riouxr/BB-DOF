@@ -6,7 +6,7 @@
 bl_info = {
     "name":        "BB DOF",
     "author":      "Blender Bob + Claude.ai",
-    "version":     (1, 3, 9),
+    "version":     (1, 4, 0),
     "blender":     (4, 2, 0),
     "location":    "Properties › Render › BB DOF",
     "description": "Real-time depth-of-field visualiser",
@@ -470,7 +470,8 @@ class BB_DOF_PT_Panel(bpy.types.Panel):
         box = layout.box()
 
         for i, cam_obj in enumerate(cameras):
-            is_target = (props.selected_camera == cam_obj.name)
+            effective_target = props.selected_camera or (scene.camera.name if scene.camera else "")
+            is_target = (effective_target == cam_obj.name)
             if i > 0:
                 box.separator(factor=0.3)
             col = box.column(align=True)
@@ -488,36 +489,40 @@ class BB_DOF_PT_Panel(bpy.types.Panel):
 
             
             # ── DOF enable checkbox ───────────────────────────────────────────
-            dof_col = col.column(align=True)
-            dof_col.enabled = is_target
-            dof_col.prop(cam_obj.data.dof, "use_dof", text="Enable DOF")
+            # Always enabled so it works on all platforms (incl. macOS) even
+            # when this camera is not the current DOF target.
+            col.prop(cam_obj.data.dof, "use_dof", text="Enable DOF")
 
             # ── Sliders ───────────────────────────────────────────────────────
-            sliders = dof_col.column(align=True)
+            sliders = col.column(align=True)
             has_focus_obj = bool(cam_obj.data.dof.focus_object)
 
-            # Near limit
+            # Near limit — shared prop, only meaningful for the target camera
             if has_focus_obj:
                 r = sliders.row(align=True); r.enabled = False
                 r.label(text="Near: driven by object", icon='OBJECT_DATA')
             else:
-                sliders.prop(props, "near_limit", text="Near")
+                r = sliders.row(align=True)
+                r.enabled = is_target
+                r.prop(props, "near_limit", text="Near")
 
-            # Focus distance (middle)
+            # Focus distance — per-camera prop, always editable
             if has_focus_obj:
                 r = sliders.row(align=True); r.enabled = False
                 r.label(text=f"Focus: {cam_obj.data.dof.focus_object.name}", icon='OBJECT_DATA')
             else:
                 sliders.prop(cam_obj.data.dof, "focus_distance", text="Focus")
 
-            # Far limit
+            # Far limit — shared prop, only meaningful for the target camera
             if has_focus_obj:
                 r = sliders.row(align=True); r.enabled = False
                 r.label(text="Far: driven by object", icon='OBJECT_DATA')
             else:
-                sliders.prop(props, "far_limit", text="Far")
+                r = sliders.row(align=True)
+                r.enabled = is_target
+                r.prop(props, "far_limit", text="Far")
 
-            # F-stop
+            # F-stop — per-camera prop, always editable
             sliders.prop(cam_obj.data.dof, "aperture_fstop", text="F-stop")
 
             # Sensor size (only for target camera)
