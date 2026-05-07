@@ -319,15 +319,15 @@ def _first_3d_space(context):
             return area.spaces[0]
     return None
 
-def _ensure_material_preview(context):
-    """Switch to Material Preview if we're in WIREFRAME or SOLID; save previous mode."""
+def _ensure_rendered(context):
+    """Switch to Rendered view if not already there; save previous mode."""
     props = context.scene.bb_dof
     space = _first_3d_space(context)
     if not space: return
     cur = space.shading.type
-    if cur in {'WIREFRAME', 'SOLID'}:
+    if cur != 'RENDERED':
         props.prev_shading = cur
-        space.shading.type = 'MATERIAL'
+        space.shading.type = 'RENDERED'
     else:
         props.prev_shading = ""
 
@@ -356,7 +356,7 @@ class BB_DOF_OT_ToggleColors(bpy.types.Operator):
                 _restore_shading(context)
                 p.clipping_active = False
             _apply_colors(context)
-            _ensure_material_preview(context)
+            _ensure_rendered(context)
         else:
             _remove_colors(context)
             _restore_shading(context)
@@ -373,13 +373,11 @@ class BB_DOF_OT_ToggleClipping(bpy.types.Operator):
         if p.clipping_active:
             if p.colors_active:
                 _remove_colors(context)
-                _restore_shading(context)
+                context.scene.bb_dof.prev_shading = ""  # discard saved shading, don't switch
                 p.colors_active = False
             _apply_clipping(context)
-            _ensure_material_preview(context)   # ← was missing before
         else:
             _restore_clipping(context)
-            _restore_shading(context)
         return {'FINISHED'}
 
 
@@ -470,8 +468,7 @@ class BB_DOF_PT_Panel(bpy.types.Panel):
         box = layout.box()
 
         for i, cam_obj in enumerate(cameras):
-            effective_target = props.selected_camera or (scene.camera.name if scene.camera else "")
-            is_target = (effective_target == cam_obj.name)
+            is_target = (props.selected_camera == cam_obj.name)
             if i > 0:
                 box.separator(factor=0.3)
             col = box.column(align=True)
@@ -489,40 +486,36 @@ class BB_DOF_PT_Panel(bpy.types.Panel):
 
             
             # ── DOF enable checkbox ───────────────────────────────────────────
-            # Always enabled so it works on all platforms (incl. macOS) even
-            # when this camera is not the current DOF target.
-            col.prop(cam_obj.data.dof, "use_dof", text="Enable DOF")
+            dof_col = col.column(align=True)
+            dof_col.enabled = is_target
+            dof_col.prop(cam_obj.data.dof, "use_dof", text="Enable DOF")
 
             # ── Sliders ───────────────────────────────────────────────────────
-            sliders = col.column(align=True)
+            sliders = dof_col.column(align=True)
             has_focus_obj = bool(cam_obj.data.dof.focus_object)
 
-            # Near limit — shared prop, only meaningful for the target camera
+            # Near limit
             if has_focus_obj:
                 r = sliders.row(align=True); r.enabled = False
                 r.label(text="Near: driven by object", icon='OBJECT_DATA')
             else:
-                r = sliders.row(align=True)
-                r.enabled = is_target
-                r.prop(props, "near_limit", text="Near")
+                sliders.prop(props, "near_limit", text="Near")
 
-            # Focus distance — per-camera prop, always editable
+            # Focus distance (middle)
             if has_focus_obj:
                 r = sliders.row(align=True); r.enabled = False
                 r.label(text=f"Focus: {cam_obj.data.dof.focus_object.name}", icon='OBJECT_DATA')
             else:
                 sliders.prop(cam_obj.data.dof, "focus_distance", text="Focus")
 
-            # Far limit — shared prop, only meaningful for the target camera
+            # Far limit
             if has_focus_obj:
                 r = sliders.row(align=True); r.enabled = False
                 r.label(text="Far: driven by object", icon='OBJECT_DATA')
             else:
-                r = sliders.row(align=True)
-                r.enabled = is_target
-                r.prop(props, "far_limit", text="Far")
+                sliders.prop(props, "far_limit", text="Far")
 
-            # F-stop — per-camera prop, always editable
+            # F-stop
             sliders.prop(cam_obj.data.dof, "aperture_fstop", text="F-stop")
 
             # Sensor size (only for target camera)
