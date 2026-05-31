@@ -6,7 +6,7 @@
 bl_info = {
     "name":        "BB DOF",
     "author":      "Blender Bob + Claude.ai",
-    "version":     (1, 4, 0),
+    "version":     (1, 4, 1),
     "blender":     (4, 2, 0),
     "location":    "Properties › Render › BB DOF",
     "description": "Real-time depth-of-field visualiser",
@@ -467,8 +467,11 @@ class BB_DOF_PT_Panel(bpy.types.Panel):
 
         box = layout.box()
 
+        # Mirror _get_target_camera fallback: if nothing explicitly selected, treat scene camera as target
+        effective_target = props.selected_camera or (scene.camera.name if scene.camera else "")
+
         for i, cam_obj in enumerate(cameras):
-            is_target = (props.selected_camera == cam_obj.name)
+            is_target = (effective_target == cam_obj.name)
             if i > 0:
                 box.separator(factor=0.3)
             col = box.column(align=True)
